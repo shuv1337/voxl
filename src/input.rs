@@ -175,7 +175,15 @@ struct Injector {
     px_per_notch: f64,
     shift_kc: u8,
     scratch_path: std::path::PathBuf,
+    /// When the last press or release was injected, to keep the next one in a later
+    /// millisecond of server time.
+    last_discrete: std::cell::Cell<Instant>,
 }
+
+/// X timestamps count milliseconds, and clients treat presses with equal timestamps as
+/// one event: Chromium counts no double-click and merges wheel clicks, window managers
+/// miss the modifier release that ends Alt+Tab. Bursts from scripts need this spacing.
+const DISCRETE_GAP: Duration = Duration::from_micros(1100);
 
 impl Injector {
     fn new(display: Option<&str>) -> Result<Self, String> {
@@ -201,6 +209,7 @@ impl Injector {
             px_per_notch: 180.0,
             shift_kc: 0,
             scratch_path: scratch_file(display),
+            last_discrete: std::cell::Cell::new(Instant::now()),
         };
         // Undo remaps left behind by a previous run that didn't exit cleanly.
         if let Ok(old) = std::fs::read_to_string(&me.scratch_path) {
@@ -275,6 +284,14 @@ impl Injector {
     }
 
     fn fake(&self, ty: u8, detail: u8, x: i16, y: i16) {
+        if ty != xproto::MOTION_NOTIFY_EVENT {
+            let since = self.last_discrete.get().elapsed();
+            if since < DISCRETE_GAP {
+                let _ = self.conn.flush();
+                std::thread::sleep(DISCRETE_GAP - since);
+            }
+            self.last_discrete.set(Instant::now());
+        }
         let _ = self
             .conn
             .xtest_fake_input(ty, detail, x11rb::CURRENT_TIME, self.root, x, y, 0);
