@@ -11,6 +11,8 @@ mod audio;
 mod capture;
 #[cfg(target_os = "linux")]
 mod capture_x11;
+#[cfg(target_os = "linux")]
+mod clipboard_wayland;
 mod convert;
 #[cfg(target_os = "linux")]
 mod corners;
@@ -22,6 +24,8 @@ mod help;
 mod hub;
 #[cfg(target_os = "linux")]
 mod input;
+#[cfg(target_os = "linux")]
+mod input_wayland;
 mod login;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -166,12 +170,9 @@ async fn serve(a: HashMap<String, String>) {
     let wayland_on = wayland.is_some();
     #[cfg(not(target_os = "linux"))]
     let wayland_on = false;
-    if wayland_on {
-        log::info!("experimental Wayland capture: read-only, embedded cursor; input and clipboard unavailable");
-    }
     let vcfg = video::VideoConfig {
         #[cfg(target_os = "linux")]
-        wayland,
+        wayland: wayland.clone(),
         display: display.clone(),
         fps: range_max(a.get("framerate"), 60.0) as u32,
         preset: a
@@ -216,14 +217,17 @@ async fn serve(a: HashMap<String, String>) {
     // --read-only: the viewer watches the desktop, it does not drive it. Only the
     // commands watching needs are accepted (see server::READ_ONLY_COMMANDS), uploads
     // are refused, and the page hides the controls that would send anything else.
-    let read_only = truthy(a.get("read-only"), false) || wayland_on;
+    let read_only = truthy(a.get("read-only"), false);
     // --enable-resize (as in selkies): clients resize the desktop to their window. Not
     // for read-only viewers: a new size changes the desktop for everyone.
     let enable_resize = truthy(a.get("enable-resize"), false);
     if enable_resize && read_only {
         log::warn!("--enable-resize is ignored with --read-only: viewers can't resize the desktop");
     }
-    let screen = (enable_resize && !read_only)
+    if enable_resize && wayland_on {
+        log::warn!("--enable-resize is ignored with Wayland capture: outputs can't be resized");
+    }
+    let screen = (enable_resize && !read_only && !wayland_on)
         .then(|| match screen::Screen::open(display.as_deref()) {
             Ok(s) => {
                 log::info!("dynamic resolution on, up to {}x{}", s.max().0, s.max().1);
@@ -282,6 +286,24 @@ async fn serve(a: HashMap<String, String>) {
         };
         let px_per_notch = range_max(a.get("scroll-px-per-notch"), 180.0);
         match input::spawn(display.clone(), clipboard, px_per_notch) {
+            Ok(tx) => *hub.input.lock() = Some(tx),
+            Err(e) => log::error!("input init failed: {e}"),
+        }
+    }
+    // Wayland: a virtual pointer and keyboard, and the clipboard through data-control.
+    // The compositor paints the cursor into the video, so viewers who drive the desktop
+    // draw only a dot, to show the pointer ahead of the stream.
+    #[cfg(target_os = "linux")]
+    if let Some(cfg) = wayland.as_ref().filter(|_| !read_only) {
+        *hub.cursor.lock() = Some(input_wayland::dot_cursor());
+        let clipboard = (clip_mode.to_server || clip_mode.to_client)
+            .then(|| clipboard_wayland::spawn(cfg, hub.clone(), clip_mode))
+            .and_then(|r| {
+                r.map_err(|e| log::error!("clipboard init failed: {e}"))
+                    .ok()
+            });
+        let px_per_notch = range_max(a.get("scroll-px-per-notch"), 180.0);
+        match input_wayland::spawn(cfg, hub.clone(), clipboard, px_per_notch) {
             Ok(tx) => *hub.input.lock() = Some(tx),
             Err(e) => log::error!("input init failed: {e}"),
         }

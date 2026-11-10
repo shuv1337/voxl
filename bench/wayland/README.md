@@ -10,13 +10,19 @@ The prototype requires `ext-image-copy-capture-v1`,
 buffers. It was exercised with labwc/wlroots 0.20.2 using its headless backend and
 Pixman renderer. It does not require a GPU, libwayland at runtime, or a portal.
 
-It is **capture-only and read-only**, with the cursor embedded by the compositor.
-Video, screenshots, recording and `/wait` share the existing pipeline. Input,
-clipboard, separate cursor metadata, viewer-requested resizing, portal/PipeWire,
-and wlr-screencopy fallback remain future work. External output resizing rebuilds
-the capture/encoder. Rotated/flipped captures, odd dimensions, and unsupported
-formats fail explicitly. Compositor disconnect/output removal currently stops the
-server; reconnect recovery is not implemented.
+The cursor is embedded by the compositor. Video, screenshots, recording and
+`/wait` share the existing pipeline. Input goes through a wlr virtual pointer bound
+to the captured output and a virtual keyboard with its own US keymap (other symbols
+are put on spare keycodes); the clipboard goes through `ext-data-control-v1`. All of
+it was exercised on labwc's headless backend, and capture and the pointer on
+Hyprland 0.57 as well. Separate cursor
+metadata (Hyprland's cursor capture sessions return an empty image),
+viewer-requested resizing, portal/PipeWire, and wlr-screencopy fallback remain
+future work. External output resizing rebuilds the capture/encoder. Rotated/flipped
+captures, odd dimensions, and unsupported formats fail explicitly. Compositor
+disconnect/output removal currently stops the server; reconnect recovery is not
+implemented. An output that draws nothing at startup (asleep) starts black, and
+without video viewers the screen is captured about twice a second.
 
 ## Buffer and damage handling
 

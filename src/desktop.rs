@@ -25,17 +25,25 @@ pub enum ClipContent {
 }
 
 /// Largest image moved through the clipboard (X requests are capped near 16 MiB).
-const MAX_IMAGE: usize = 15 << 20;
+pub const MAX_IMAGE: usize = 15 << 20;
 
 /// Sets the remote CLIPBOARD and returns once the X server has registered us as owner,
 /// so a paste shortcut injected right afterwards sees the new contents.
 #[derive(Clone)]
 pub struct ClipboardHandle {
-    tx: mpsc::Sender<(ClipContent, mpsc::SyncSender<()>)>,
+    tx: mpsc::Sender<ClipRequest>,
     wake_w: Arc<OwnedFd>,
 }
 
+/// A clipboard update and the channel that reports it applied.
+pub type ClipRequest = (ClipContent, mpsc::SyncSender<()>);
+
 impl ClipboardHandle {
+    /// `wake_w` is written to after each request, to wake the thread reading `tx`.
+    pub fn new(tx: mpsc::Sender<ClipRequest>, wake_w: Arc<OwnedFd>) -> Self {
+        Self { tx, wake_w }
+    }
+
     pub fn set_blocking(&self, content: ClipContent) {
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         if self.tx.send((content, done_tx)).is_ok() {
@@ -45,6 +53,7 @@ impl ClipboardHandle {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ClipboardMode {
     pub to_server: bool,
     pub to_client: bool,
@@ -120,7 +129,7 @@ pub fn spawn(
         .map_err(|e| e.to_string())?;
     }
     conn.flush().map_err(|e| e.to_string())?;
-    let (tx, rx) = mpsc::channel::<(ClipContent, mpsc::SyncSender<()>)>();
+    let (tx, rx) = mpsc::channel::<ClipRequest>();
     let (wake_r, wake_w) =
         pipe2(OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).map_err(|e| e.to_string())?;
     let wake_w = Arc::new(wake_w);
@@ -322,7 +331,7 @@ pub fn spawn(
     Ok(ClipboardHandle { tx, wake_w })
 }
 
-fn hash(data: &[u8]) -> u64 {
+pub fn hash(data: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut h);
@@ -331,24 +340,33 @@ fn hash(data: &[u8]) -> u64 {
 
 fn publish(hub: &Hub, atoms: &Atoms, target: u32, data: Vec<u8>, last_image: &mut Option<u64>) {
     if target == atoms.png {
-        if data.is_empty() || data.len() > MAX_IMAGE {
-            return;
-        }
-        let h = hash(&data);
-        if *last_image == Some(h) {
-            return;
-        }
-        *last_image = Some(h);
-        let mut msg = Vec::with_capacity(data.len() + 1);
-        msg.push(0x04);
-        msg.extend_from_slice(&data);
-        let b = Bytes::from(msg);
-        hub.broadcast(|| Out::Bin(b.clone()));
+        publish_image(hub, data, last_image);
+    } else if let Ok(text) = String::from_utf8(data) {
+        publish_text(hub, text);
+    }
+}
+
+/// Sends an image the desktop copied to every client, unless it is the one just sent
+/// or received.
+pub fn publish_image(hub: &Hub, png: Vec<u8>, last_image: &mut Option<u64>) {
+    if png.is_empty() || png.len() > MAX_IMAGE {
         return;
     }
-    let Ok(text) = String::from_utf8(data) else {
+    let h = hash(&png);
+    if *last_image == Some(h) {
         return;
-    };
+    }
+    *last_image = Some(h);
+    let mut msg = Vec::with_capacity(png.len() + 1);
+    msg.push(0x04);
+    msg.extend_from_slice(&png);
+    let b = Bytes::from(msg);
+    hub.broadcast(|| Out::Bin(b.clone()));
+}
+
+/// Sends text the desktop copied to every client, unless it is what the clipboard
+/// already held.
+pub fn publish_text(hub: &Hub, text: String) {
     if text.is_empty() {
         return;
     }

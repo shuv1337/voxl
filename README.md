@@ -341,10 +341,14 @@ localhost:
 
 Phones and tablets get touch input and an on-screen keyboard.
 
-**Wayland?** Experimental capture is available with `--capture-backend=wayland`.
-It requires `ext-image-copy-capture-v1` and XRGB/ARGB shared-memory buffers, as
-provided by recent labwc/wlroots. This prototype is read-only, embeds the cursor,
-and supports video, screenshots, recordings and `/wait`; remote input, clipboard,
+**Wayland?** Experimental, with `--capture-backend=wayland`: voxl streams one output
+(`--wayland-output=DP-1`) of a running Wayland session and drives it. Capture needs
+`ext-image-copy-capture-v1` with XRGB/ARGB shared-memory buffers; the pointer and
+keyboard need `wlr-virtual-pointer-unstable-v1` and `virtual-keyboard-unstable-v1`; the
+clipboard needs `ext-data-control-v1`. Hyprland and recent labwc/wlroots have all of
+them. The compositor paints the cursor into the video, and viewers see a dot where
+their own pointer is; on Hyprland the painted cursor only moves when the screen is
+redrawn, unless `cursor:no_hardware_cursors` is on. Viewers can't resize the output, and
 portal/PipeWire capture and a wlr-screencopy fallback are not implemented. X11 remains
 the default, including its direct Xvfb framebuffer path. See the
 [Wayland prototype and benchmark instructions](bench/wayland/README.md).

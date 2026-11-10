@@ -47,12 +47,13 @@ Video:
 
 #[cfg(not(any(target_os = "macos", windows)))]
 const DESKTOP: &str = "
-Desktop (X11 by default; experimental read-only Wayland capture):
+Desktop (X11 by default; experimental Wayland capture and input):
   --capture-backend             x11 or wayland (Linux; default x11)
   --wayland-display             Wayland socket name/path (default $WAYLAND_DISPLAY)
   --wayland-output              output name (default first output)
-                                ext-image-copy-capture + SHM required; read-only,
-                                embedded cursor, no clipboard or viewer resizing
+                                ext-image-copy-capture + SHM, wlr virtual pointer,
+                                virtual keyboard and ext-data-control required;
+                                embedded cursor, no viewer resizing
   --enable-clipboard            true, in, out or false (default true)
   --audio-enabled               desktop audio (default true)
   --audio-device-name           PulseAudio source (default output.monitor)
