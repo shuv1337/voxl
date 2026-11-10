@@ -30,6 +30,12 @@ pub struct Config {
     pub output: Option<String>,
 }
 
+/// How often the screen is captured while no one is watching: enough for `/wait` and
+/// screenshots, without making the compositor copy every frame it draws.
+const UNWATCHED_INTERVAL: Duration = Duration::from_millis(250);
+/// Failed frames in a row before the capture gives up.
+const MAX_FAILURES: u32 = 20;
+
 /// Damage is a bounded bitset, so a blocked encoder cannot accumulate an unbounded
 /// rectangle list. The same representation tracks each capture slot's stale pixels.
 struct Damage {
@@ -121,11 +127,16 @@ struct Wire {
     outputs: Vec<(u32, wl_output::WlOutput, String)>,
     selected: Option<u32>,
     size: (u32, u32),
+    /// Usable SHM formats in the constraints being received.
+    offered: Vec<wl_shm::Format>,
     format: Option<wl_shm::Format>,
     constraints: bool,
-    initialized: bool,
+    /// The size and format the buffers were made for.
+    active: Option<((u32, u32), wl_shm::Format)>,
     sync_done: bool,
     ready: bool,
+    /// The pending frame failed for a reason worth another try.
+    failed: bool,
     damage: Vec<Rect>,
     rebuild: bool,
     error: Option<String>,
@@ -142,28 +153,69 @@ pub struct Capturer {
     pending: Option<(frame::ExtImageCopyCaptureFrameV1, usize)>,
     dirty: Damage,
     band: Option<Band>,
+    watched: bool,
+    requested: Instant,
+    failures: u32,
 }
 
-fn dispatch(
+/// Connects to `display` (a socket name under XDG_RUNTIME_DIR, or a path), or to
+/// $WAYLAND_DISPLAY.
+pub fn connect(display: Option<&str>) -> Result<Connection, String> {
+    let Some(name) = display else {
+        return Connection::connect_to_env().map_err(|e| e.to_string());
+    };
+    let p = PathBuf::from(name);
+    let p = if p.is_absolute() {
+        p
+    } else {
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is unset")?)
+            .join(p)
+    };
+    Connection::from_socket(UnixStream::connect(p).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+/// Sends queued requests, waits up to `timeout` ms for events and dispatches them.
+pub fn dispatch<S>(
+    conn: &Connection,
+    queue: &mut EventQueue<S>,
+    state: &mut S,
+    timeout: u16,
+) -> Result<(), String> {
+    queue.dispatch_pending(state).map_err(|e| e.to_string())?;
+    conn.flush().map_err(|e| e.to_string())?;
+    if let Some(guard) = queue.prepare_read() {
+        let mut fds = [PollFd::new(conn.as_fd(), PollFlags::POLLIN)];
+        match poll(&mut fds, timeout) {
+            Ok(_) | Err(nix::errno::Errno::EINTR) => (),
+            Err(e) => return Err(e.to_string()),
+        }
+        if fds[0].revents().is_some_and(|r| !r.is_empty()) {
+            match guard.read() {
+                Ok(_) => (),
+                // Nothing to read after all; the next call polls again.
+                Err(wayland_client::backend::WaylandError::Io(e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+    queue.dispatch_pending(state).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// `dispatch` for the capture connection: an error an event handler recorded ends it.
+fn dispatch_wire(
     conn: &Connection,
     queue: &mut EventQueue<Wire>,
     wire: &mut Wire,
     timeout: u16,
 ) -> Result<(), String> {
-    queue.dispatch_pending(wire).map_err(|e| e.to_string())?;
-    conn.flush().map_err(|e| e.to_string())?;
-    if let Some(guard) = queue.prepare_read() {
-        let mut fds = [PollFd::new(conn.as_fd(), PollFlags::POLLIN)];
-        poll(&mut fds, timeout).map_err(|e| e.to_string())?;
-        if fds[0].revents().is_some_and(|r| !r.is_empty()) {
-            guard.read().map_err(|e| e.to_string())?;
-        }
+    dispatch(conn, queue, wire, timeout)?;
+    match &wire.error {
+        Some(e) => Err(e.clone()),
+        None => Ok(()),
     }
-    queue.dispatch_pending(wire).map_err(|e| e.to_string())?;
-    if let Some(e) = &wire.error {
-        return Err(e.clone());
-    }
-    Ok(())
 }
 
 fn sync(conn: &Connection, queue: &mut EventQueue<Wire>, wire: &mut Wire) -> Result<(), String> {
@@ -174,28 +226,14 @@ fn sync(conn: &Connection, queue: &mut EventQueue<Wire>, wire: &mut Wire) -> Res
         if Instant::now() >= deadline {
             return Err("Wayland initialization timed out".into());
         }
-        dispatch(conn, queue, wire, 50)?;
+        dispatch_wire(conn, queue, wire, 50)?;
     }
     Ok(())
 }
 
 impl Capturer {
     pub fn new(cfg: &Config) -> Result<Self, String> {
-        let conn = if let Some(name) = &cfg.display {
-            let p = PathBuf::from(name);
-            let p = if p.is_absolute() {
-                p
-            } else {
-                PathBuf::from(
-                    std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is unset")?,
-                )
-                .join(p)
-            };
-            Connection::from_socket(UnixStream::connect(p).map_err(|e| e.to_string())?)
-        } else {
-            Connection::connect_to_env()
-        }
-        .map_err(|e| e.to_string())?;
+        let conn = connect(cfg.display.as_deref())?;
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
         conn.display().get_registry(&qh, ());
@@ -271,7 +309,7 @@ impl Capturer {
                 stale,
             });
         }
-        wire.initialized = true;
+        wire.active = Some((wire.size, format));
         let mut cap = Self {
             state: CaptureState::new(width, height),
             conn,
@@ -283,27 +321,71 @@ impl Capturer {
             pending: None,
             dirty: Damage::new(width, height),
             band: None,
+            watched: true,
+            requested: Instant::now(),
+            failures: 0,
         };
         cap.request()?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while cap.current.is_none() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while cap.current.is_none() && !cap.wire.rebuild {
             if Instant::now() >= deadline {
-                return Err("Wayland first frame timed out".into());
+                // An output that is asleep draws nothing. Start black instead of not
+                // starting: a viewer has to get in to wake it.
+                log::warn!("no frame from the Wayland output yet (asleep?); showing black until one arrives");
+                cap.current = Some(1);
+                break;
             }
-            dispatch(&cap.conn, &mut cap.queue, &mut cap.wire, 50)?;
-            if cap.wire.rebuild {
-                return Err("Wayland output changed during initialization".into());
-            }
-            cap.adopt();
+            dispatch_wire(&cap.conn, &mut cap.queue, &mut cap.wire, 50)?;
+            cap.settle()?;
+            cap.request()?;
         }
         cap.request()?;
         Ok(cap)
+    }
+
+    /// Captures every frame while someone watches, and a few a second otherwise.
+    pub fn set_watched(&mut self, watched: bool) {
+        self.watched = watched;
+    }
+
+    /// Takes in a finished frame, or drops a failed one so it is asked for again.
+    fn settle(&mut self) -> Result<(), String> {
+        if std::mem::take(&mut self.wire.failed) {
+            self.wire.damage.clear();
+            if let Some((frame, i)) = self.pending.take() {
+                frame.destroy();
+                // The compositor may have written part of it.
+                self.slots[i].stale.full();
+            }
+            self.failures += 1;
+            if self.failures > MAX_FAILURES {
+                return Err("Wayland capture keeps failing".into());
+            }
+            return Ok(());
+        }
+        if self.wire.ready {
+            self.failures = 0;
+        }
+        self.adopt();
+        Ok(())
     }
 
     fn request(&mut self) -> Result<(), String> {
         if self.pending.is_some() || self.wire.rebuild {
             return Ok(());
         }
+        // Unwatched, or just failed: not right away.
+        let gap = if self.failures > 0 {
+            Duration::from_millis(100)
+        } else if self.watched {
+            Duration::ZERO
+        } else {
+            UNWATCHED_INTERVAL
+        };
+        if self.current.is_some() && self.requested.elapsed() < gap {
+            return Ok(());
+        }
+        self.requested = Instant::now();
         let i = self.current.map_or(0, |i| 1 - i);
         let frame = self.session.create_frame(&self.queue.handle(), ());
         frame.attach_buffer(&self.slots[i].buffer);
@@ -350,9 +432,9 @@ impl Capturer {
         self.conn.as_fd()
     }
     pub fn pump(&mut self) -> Result<(), String> {
-        dispatch(&self.conn, &mut self.queue, &mut self.wire, 0)?;
+        dispatch_wire(&self.conn, &mut self.queue, &mut self.wire, 0)?;
         if !self.wire.rebuild {
-            self.adopt();
+            self.settle()?;
             self.request()?;
         }
         Ok(())
@@ -392,6 +474,17 @@ impl Capturer {
         // Do not wait for damage on a static screen: adopt any completed capture,
         // then copy its pixels and leave the matching activity for note_changes().
         self.pump()?;
+        if !self.watched && self.pending.is_none() && !self.wire.rebuild {
+            // Unwatched captures are spaced out, so this one may be overdue. Ask now
+            // and give a screen that changed since a moment to be copied.
+            self.requested = Instant::now() - UNWATCHED_INTERVAL;
+            self.request()?;
+            let deadline = Instant::now() + Duration::from_millis(60);
+            while self.pending.is_some() && !self.wire.rebuild && Instant::now() < deadline {
+                dispatch_wire(&self.conn, &mut self.queue, &mut self.wire, 10)?;
+                self.settle()?;
+            }
+        }
         if self.wire.rebuild {
             return Err("Wayland output changed during screenshot".into());
         }
@@ -485,12 +578,20 @@ impl Dispatch<session::ExtImageCopyCaptureSessionV1, ()> for Wire {
             session::Event::ShmFormat {
                 format: WEnum::Value(f),
             } if matches!(f, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888) => {
-                s.format = Some(f)
+                s.offered.push(f)
             }
             session::Event::Done => {
                 s.constraints = true;
-                if s.initialized {
-                    s.rebuild = true;
+                let offered = std::mem::take(&mut s.offered);
+                match s.active {
+                    None => s.format = offered.first().copied(),
+                    // Compositors repeat the constraints on any mode change; only a
+                    // new size, or losing the format in use, needs new buffers.
+                    Some((size, format)) => {
+                        if s.size != size || !offered.contains(&format) {
+                            s.rebuild = true;
+                        }
+                    }
                 }
             }
             session::Event::Stopped => s.error = Some("Wayland capture session stopped".into()),
@@ -533,9 +634,12 @@ impl Dispatch<frame::ExtImageCopyCaptureFrameV1, ()> for Wire {
             frame::Event::Failed {
                 reason: WEnum::Value(frame::FailureReason::BufferConstraints),
             } => s.rebuild = true,
-            frame::Event::Failed { reason } => {
-                s.error = Some(format!("Wayland capture failed: {reason:?}"))
-            }
+            // The session is over; the stopped event says so too.
+            frame::Event::Failed {
+                reason: WEnum::Value(frame::FailureReason::Stopped),
+            } => s.error = Some("Wayland capture session stopped".into()),
+            // Anything else may work the next time.
+            frame::Event::Failed { .. } => s.failed = true,
             _ => (),
         }
     }

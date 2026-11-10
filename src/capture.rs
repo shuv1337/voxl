@@ -79,6 +79,12 @@ impl Capturer {
     pub fn pump(&mut self) -> Result<(), String> {
         delegate!(self, pump)
     }
+    /// Whether anyone is watching the video; see wayland::Capturer::set_watched.
+    pub fn set_watched(&mut self, watched: bool) {
+        if let Self::Wayland(c) = self {
+            c.set_watched(watched);
+        }
+    }
     pub fn needs_rebuild(&self) -> bool {
         delegate!(self, needs_rebuild)
     }

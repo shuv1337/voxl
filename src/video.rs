@@ -522,6 +522,8 @@ fn capture_loop(
             pool[i] = Some(b);
         }
         let clients = hub.video_clients();
+        #[cfg(target_os = "linux")]
+        cap.set_watched(!clients.is_empty());
         if clients.is_empty() {
             if had_clients {
                 rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
