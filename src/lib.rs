@@ -150,6 +150,17 @@ async fn serve(a: HashMap<String, String>) {
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4) as u32;
+    // --wayland-output=DP-1,DP-2: the first is captured, viewers can switch to the others.
+    #[cfg(target_os = "linux")]
+    let wayland_outputs: Vec<String> = a
+        .get("wayland-output")
+        .map(|s| {
+            s.split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     #[cfg(target_os = "linux")]
     let wayland = match a
         .get("capture-backend")
@@ -159,7 +170,7 @@ async fn serve(a: HashMap<String, String>) {
         "x11" => None,
         "wayland" => Some(wayland::Config {
             display: a.get("wayland-display").cloned(),
-            output: a.get("wayland-output").cloned(),
+            output: wayland_outputs.first().cloned(),
         }),
         other => {
             log::error!("unknown capture backend: {other} (expected x11 or wayland)");
@@ -372,6 +383,12 @@ async fn serve(a: HashMap<String, String>) {
         extra.insert("mic".into(), mic.is_some().into());
         if read_only {
             extra.insert("readOnly".into(), true.into());
+        }
+        #[cfg(target_os = "linux")]
+        if wayland_on && wayland_outputs.len() > 1 {
+            extra.insert("outputs".into(), serde_json::json!(wayland_outputs));
+            *hub.output.lock() = wayland_outputs.first().cloned();
+            *hub.outputs.lock() = wayland_outputs.clone();
         }
         extra.insert(
             "files".into(),

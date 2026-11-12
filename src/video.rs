@@ -68,7 +68,7 @@ struct Pipeline {
 /// ends the capture loop: the encoder drains, the screen is resized and the pipeline
 /// is rebuilt at the new size, and clients get the new geometry and a keyframe.
 pub fn spawn(
-    cfg: VideoConfig,
+    mut cfg: VideoConfig,
     hub: Arc<Hub>,
     mut screen: Option<crate::screen::Screen>,
 ) -> Result<(), String> {
@@ -105,8 +105,25 @@ pub fn spawn(
                     log::warn!("resize to {w}x{h} failed: {e}");
                 }
             }
+            #[cfg(target_os = "linux")]
+            let previous = switch_output(&mut cfg, &hub);
             p = match build(&cfg, &hub) {
                 Ok(p) => p,
+                #[cfg(target_os = "linux")]
+                Err(e) if previous.is_some() => {
+                    log::warn!("switching output failed: {e}; staying on the previous one");
+                    if let Some(w) = cfg.wayland.as_mut() {
+                        w.output = previous.clone();
+                    }
+                    *hub.output.lock() = previous;
+                    match build(&cfg, &hub) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log::error!("video restart failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Err(e) => {
                     log::error!("video restart failed: {e}");
                     std::process::exit(1);
@@ -115,6 +132,21 @@ pub fn spawn(
         })
         .unwrap();
     Ok(())
+}
+
+/// Applies a viewer's request for another Wayland output to `cfg`, and returns the
+/// output it replaced.
+#[cfg(target_os = "linux")]
+fn switch_output(cfg: &mut VideoConfig, hub: &Hub) -> Option<String> {
+    let want = hub.output_req.lock().take()?;
+    let w = cfg.wayland.as_mut()?;
+    if w.output.as_deref() == Some(want.as_str()) {
+        return None;
+    }
+    log::info!("switching to output {want}");
+    let previous = w.output.replace(want.clone());
+    *hub.output.lock() = Some(want);
+    previous
 }
 
 fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
@@ -490,7 +522,8 @@ fn capture_loop(
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
-        if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
+        if hub.resize_req.lock().is_some() || hub.output_req.lock().is_some() || cap.needs_rebuild()
+        {
             return Ok(());
         }
         cap.pump()?;

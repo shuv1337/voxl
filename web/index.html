@@ -204,6 +204,23 @@
 			#tools.mic #mic-btn {
 				display: inline-grid !important;
 			}
+			/* Output switch: only when the server captures one of several outputs. */
+			#out-btn {
+				display: none;
+				width: auto;
+				padding: 0 8px;
+				font:
+					600 12px/1 'Inter',
+					sans-serif;
+				color: var(--icon-default);
+				white-space: nowrap;
+			}
+			#out-btn:hover {
+				color: var(--icon-title);
+			}
+			#tools.outputs #out-btn {
+				display: inline-grid;
+			}
 			/* Read-only: nothing on the desktop accepts what the keyboard would send. */
 			#tools.read-only #kb-btn {
 				display: none !important;
@@ -661,6 +678,12 @@
 						stroke-linejoin="round" />
 				</svg>
 			</button>
+			<button
+				id="out-btn"
+				class="ib"
+				type="button"
+				title="Switch display"
+				aria-label="Switch display"></button>
 			<button
 				id="fs-btn"
 				class="ib"

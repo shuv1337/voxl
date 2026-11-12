@@ -342,7 +342,9 @@ localhost:
 Phones and tablets get touch input and an on-screen keyboard.
 
 **Wayland?** Experimental, with `--capture-backend=wayland`: voxl streams one output
-(`--wayland-output=DP-1`) of a running Wayland session and drives it. Capture needs
+(`--wayland-output=DP-1`) of a running Wayland session and drives it; with a list
+(`--wayland-output=DP-1,DP-2`) the toolbar gets a button that switches every viewer
+to the next output. Capture needs
 `ext-image-copy-capture-v1` with XRGB/ARGB shared-memory buffers; the pointer and
 keyboard need `wlr-virtual-pointer-unstable-v1` and `virtual-keyboard-unstable-v1`; the
 clipboard needs `ext-data-control-v1`. Hyprland and recent labwc/wlroots have all of

@@ -258,6 +258,8 @@ struct Injector {
     queue: EventQueue<Globals>,
     globals: Globals,
     pointer: ZwlrVirtualPointerV1,
+    /// The output `pointer` is bound to.
+    output: Option<String>,
     keyboard: ZwpVirtualKeyboardV1,
     hub: Arc<Hub>,
     start: Instant,
@@ -270,6 +272,29 @@ struct Injector {
     px_per_notch: f64,
     clipboard: Option<crate::desktop::ClipboardHandle>,
     failed: bool,
+}
+
+/// A virtual pointer bound to `output`, so absolute positions land on that output alone.
+fn make_pointer(
+    globals: &Globals,
+    qh: &QueueHandle<Globals>,
+    output: Option<&str>,
+) -> ZwlrVirtualPointerV1 {
+    let (pointers, version) = globals.pointers.as_ref().expect("checked in new");
+    let seat = globals.seat.as_ref();
+    let bound = globals
+        .outputs
+        .iter()
+        .find(|(_, name)| output.is_none_or(|wanted| wanted == name));
+    match bound {
+        Some((o, _)) if *version >= 2 => {
+            pointers.create_virtual_pointer_with_output(seat, Some(o), qh, ())
+        }
+        _ => {
+            log::warn!("virtual pointer is not bound to an output; positions span every output");
+            pointers.create_virtual_pointer(seat, qh, ())
+        }
+    }
 }
 
 /// X button numbers, as the client sends them, to evdev button codes.
@@ -296,26 +321,10 @@ impl Injector {
             queue.roundtrip(&mut globals).map_err(|e| e.to_string())?;
         }
         let seat = globals.seat.as_ref().ok_or("compositor has no wl_seat")?;
-        let (pointers, version) = globals
-            .pointers
-            .as_ref()
-            .ok_or("compositor lacks wlr-virtual-pointer-unstable-v1")?;
-        let output = globals
-            .outputs
-            .iter()
-            .find(|(_, name)| cfg.output.as_ref().is_none_or(|wanted| wanted == name));
-        // Bound to the captured output, absolute positions land on that output alone.
-        let pointer = match output {
-            Some((output, _)) if *version >= 2 => {
-                pointers.create_virtual_pointer_with_output(Some(seat), Some(output), &qh, ())
-            }
-            _ => {
-                log::warn!(
-                    "virtual pointer is not bound to an output; positions span every output"
-                );
-                pointers.create_virtual_pointer(Some(seat), &qh, ())
-            }
-        };
+        if globals.pointers.is_none() {
+            return Err("compositor lacks wlr-virtual-pointer-unstable-v1".into());
+        }
+        let pointer = make_pointer(&globals, &qh, cfg.output.as_deref());
         let keyboard = globals
             .keyboards
             .as_ref()
@@ -326,6 +335,7 @@ impl Injector {
             queue,
             globals,
             pointer,
+            output: cfg.output.clone(),
             keyboard,
             hub,
             start: Instant::now(),
@@ -392,7 +402,39 @@ impl Injector {
         self.pointer.frame();
     }
 
+    /// Rebinds the pointer when the video switched to another output, letting go of
+    /// any buttons first so nothing stays pressed on the old one.
+    fn follow_output(&mut self) {
+        let current = self.hub.output.lock().clone();
+        if current.is_none() || current == self.output {
+            return;
+        }
+        for b in 0..self.buttons.len() {
+            if std::mem::take(&mut self.buttons[b]) {
+                if let Some(code) = evdev_button(b as u8) {
+                    let t = self.time(true);
+                    self.pointer
+                        .button(t, code, wl_pointer::ButtonState::Released);
+                    self.pointer.frame();
+                }
+            }
+        }
+        self.pointer.destroy();
+        let qh = self.queue.handle();
+        self.pointer = make_pointer(&self.globals, &qh, current.as_deref());
+        self.output = current;
+    }
+
     fn handle(&mut self, ev: InputEvent) {
+        if matches!(
+            ev,
+            InputEvent::Move { .. }
+                | InputEvent::Button { .. }
+                | InputEvent::Scroll { .. }
+                | InputEvent::ScrollPx { .. }
+        ) {
+            self.follow_output();
+        }
         match ev {
             InputEvent::Move { x, y } => {
                 let w = self.hub.width.load(Ordering::Relaxed);

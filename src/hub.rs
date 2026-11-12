@@ -254,6 +254,11 @@ pub struct Hub {
     pub resize_req: Mutex<Option<(u32, u32)>>,
     /// Largest desktop size (Some when dynamic resolution is on).
     pub resize_max: Mutex<Option<(u32, u32)>>,
+    /// Wayland output being captured, and one a client asked to switch to.
+    pub output: Mutex<Option<String>>,
+    pub output_req: Mutex<Option<String>>,
+    /// Outputs viewers may switch between (--wayland-output=A,B).
+    pub outputs: Mutex<Vec<String>>,
     /// Server settings sent in every `hello` besides the geometry (audio, files, ...).
     pub hello_extra: Mutex<serde_json::Map<String, serde_json::Value>>,
     /// Screenshot requests, answered by the capture thread with the current screen.
@@ -278,6 +283,9 @@ impl Hub {
             last_clipboard: Mutex::new(None),
             resize_req: Mutex::new(None),
             resize_max: Mutex::new(None),
+            output: Mutex::new(None),
+            output_req: Mutex::new(None),
+            outputs: Mutex::new(Vec::new()),
             hello_extra: Mutex::new(serde_json::Map::new()),
             snapshots: Mutex::new(Vec::new()),
             activity: Default::default(),
@@ -338,6 +346,9 @@ impl Hub {
         m.insert("w".into(), self.width.load(Ordering::Relaxed).into());
         m.insert("h".into(), self.height.load(Ordering::Relaxed).into());
         m.insert("stripes".into(), serde_json::json!(*self.stripes.lock()));
+        if let Some(o) = self.output.lock().as_ref() {
+            m.insert("output".into(), o.clone().into());
+        }
         serde_json::Value::Object(m).to_string()
     }
 

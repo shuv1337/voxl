@@ -17,12 +17,12 @@ import { createVideo } from './video';
 
 /**
  * Commands a read-only viewer sends: acks, video and audio on/off, keyframe requests
- * and ping replies. Anything else would act on the desktop (input, clipboard,
+ * ping replies and output switches. Anything else would act on the desktop (input, clipboard,
  * microphone, resizing). The server accepts only these from read-only viewers too
  * (READ_ONLY_COMMANDS in server.rs), so a page that ignores the hello flag cannot
  * drive the desktop either; this keeps it from sending what would be dropped.
  */
-const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po']);
+const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po', 'o']);
 
 function blocksInput(app: App, command: string): boolean {
 	return app.readOnly && !READ_ONLY_COMMANDS.has(command.split(',')[0]);
@@ -94,7 +94,7 @@ function main() {
 	};
 	setupPointer(app, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
-	setupToolbar(app, video.layout);
+	const outputs = setupToolbar(app, video.layout);
 	const files = createFiles(app);
 	const mic = createMic(app);
 	const resize = createResize(app);
@@ -142,6 +142,7 @@ function main() {
 				files.setup(m.files);
 				mic.setup(!!m.mic && !app.readOnly);
 				resize.setup(m.resize);
+				outputs.setup(m.outputs, m.output);
 				statusEl.style.display = 'none';
 				break;
 			case 'status':

@@ -50,7 +50,8 @@ const DESKTOP: &str = "
 Desktop (X11 by default; experimental Wayland capture and input):
   --capture-backend             x11 or wayland (Linux; default x11)
   --wayland-display             Wayland socket name/path (default $WAYLAND_DISPLAY)
-  --wayland-output              output name (default first output)
+  --wayland-output              output name (default first output); a list
+                                (DP-1,DP-2) lets viewers switch between them
                                 ext-image-copy-capture + SHM, wlr virtual pointer,
                                 virtual keyboard and ext-data-control required;
                                 embedded cursor, no viewer resizing

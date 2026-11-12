@@ -43,6 +43,9 @@ export interface Hello {
 	files?: FilesConfig;
 	/** The server only shows the desktop: the viewer cannot send input. */
 	readOnly?: boolean;
+	/** Outputs the server can switch between, and the one being shown (Wayland). */
+	outputs?: string[];
+	output?: string;
 	/** Dynamic resolution: desktop pixels per CSS pixel of the viewer's window. */
 	resize?: { scale: number };
 }
@@ -71,6 +74,8 @@ export const cmd = {
 	/** Ask for a desktop of this size (dynamic resolution). */
 	resize: (w: number, h: number) => `sz,${w},${h}`,
 	keyframe: 'kf',
+	/** Show another of the server's outputs (every viewer switches with it). */
+	output: (name: string) => `o,${name}`,
 	pong: (sent: number) => `po,${sent}`,
 } as const;
 

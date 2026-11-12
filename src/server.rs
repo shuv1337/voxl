@@ -298,9 +298,9 @@ fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
 }
 
 /// Commands a --read-only viewer may send: acks, video and audio on/off, keyframe
-/// requests and ping replies. Everything else acts on the desktop (input, clipboard,
+/// requests, ping replies and output switches. Everything else acts on the desktop (input, clipboard,
 /// microphone, resizing) and is dropped. The web client keeps the same list.
-const READ_ONLY_COMMANDS: &[&str] = &["a", "v", "au", "kf", "po"];
+const READ_ONLY_COMMANDS: &[&str] = &["a", "v", "au", "kf", "po", "o"];
 
 fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collections::VecDeque<u32>) {
     let (cmd, rest) = t.split_once(',').unwrap_or((t, ""));
@@ -392,6 +392,15 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
                     s.hub.height.load(Ordering::Relaxed),
                 );
                 *s.hub.resize_req.lock() = (want != current).then_some(want);
+                s.hub.wake();
+            }
+        }
+        // o,NAME: capture another of the --wayland-output outputs, for every viewer.
+        "o" => {
+            let name = rest.trim();
+            let known = s.hub.outputs.lock().iter().any(|o| o == name);
+            if known && s.hub.output.lock().as_deref() != Some(name) {
+                *s.hub.output_req.lock() = Some(name.to_string());
                 s.hub.wake();
             }
         }
